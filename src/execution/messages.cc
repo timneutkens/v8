@@ -580,8 +580,14 @@ MaybeHandle<JSObject> ErrorUtils::Construct(
   // 2. Let O be ? OrdinaryCreateFromConstructor(newTarget, "%ErrorPrototype%",
   //    « [[ErrorData]] »).
   Handle<JSObject> err;
-  ASSIGN_RETURN_ON_EXCEPTION(isolate, err,
-                             JSObject::New(target, new_target_recv, {}));
+  if (V8_LIKELY(*new_target_recv == *target && target->has_initial_map() &&
+                !target->initial_map()->is_dictionary_map())) {
+    DirectHandle<Map> initial_map(target->initial_map(), isolate);
+    err = isolate->factory()->NewJSObjectFromMap(initial_map);
+  } else {
+    ASSIGN_RETURN_ON_EXCEPTION(isolate, err,
+                               JSObject::New(target, new_target_recv, {}));
+  }
 
   // 3. If message is not undefined, then
   //  a. Let msg be ? ToString(message).
