@@ -90,7 +90,10 @@
 #include "src/objects/abstract-code-inl.h"
 #include "src/objects/backing-store.h"
 #include "src/objects/call-site-info-inl.h"
+#include "src/objects/descriptor-array-inl.h"
+#include "src/objects/dictionary-inl.h"
 #include "src/objects/feedback-vector.h"
+#include "src/objects/field-index-inl.h"
 #include "src/objects/hash-table-inl.h"
 #include "src/objects/heap-object-set-map-inl.h"
 #include "src/objects/instance-type-inl.h"
@@ -2195,13 +2198,103 @@ MaybeDirectHandle<Script> Isolate::CurrentReferrerScript() {
   return direct_handle(script->GetEvalOrigin(), this);
 }
 
+namespace {
+
+V8_NOINLINE DirectHandle<Object> GetStackTraceLimitSlowPath(
+    Isolate* isolate, DirectHandle<JSObject> error, DirectHandle<String> key,
+    InternalIndex descriptor) {
+  if (error->HasFastProperties()) {
+    if (descriptor.is_found()) {
+      Tagged<DescriptorArray> descriptors =
+          error->map()->instance_descriptors();
+      DCHECK_EQ(PropertyKind::kAccessor,
+                descriptors->GetDetails(descriptor).kind());
+      Tagged<Object> accessors = descriptors->GetStrongValue(descriptor);
+      if (!IsAccessorInfo(accessors)) {
+        return isolate->factory()->undefined_value();
+      }
+    }
+    return JSReceiver::GetDataProperty(isolate, error, key);
+  }
+
+  if constexpr (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
+    DirectHandle<SwissNameDictionary> dictionary(
+        error->property_dictionary_swiss(), isolate);
+    InternalIndex entry = dictionary->FindEntry(isolate, key);
+    if (entry.is_found()) {
+      Tagged<Object> value = dictionary->ValueAt(entry);
+      if (dictionary->DetailsAt(entry).kind() == PropertyKind::kData) {
+        return direct_handle(value, isolate);
+      }
+      if (!IsAccessorInfo(value)) {
+        return isolate->factory()->undefined_value();
+      }
+      return JSReceiver::GetDataProperty(isolate, error, key);
+    }
+  } else {
+    DirectHandle<NameDictionary> dictionary(error->property_dictionary(),
+                                            isolate);
+    InternalIndex entry = dictionary->FindEntry(isolate, key);
+    if (entry.is_found()) {
+      Tagged<Object> value = dictionary->ValueAt(entry);
+      if (dictionary->DetailsAt(entry).kind() == PropertyKind::kData) {
+        return direct_handle(value, isolate);
+      }
+      if (!IsAccessorInfo(value)) {
+        return isolate->factory()->undefined_value();
+      }
+      return JSReceiver::GetDataProperty(isolate, error, key);
+    }
+  }
+
+  Tagged<JSPrototype> prototype = error->map()->prototype();
+  if (IsNull(prototype)) return isolate->factory()->undefined_value();
+  DirectHandle<JSAny> lookup_start(Cast<JSReceiver>(prototype), isolate);
+  LookupIterator it(isolate, error, key, lookup_start,
+                    LookupIterator::PROTOTYPE_CHAIN_SKIP_INTERCEPTOR);
+  if (!it.IsFound()) return isolate->factory()->undefined_value();
+  return JSReceiver::GetDataProperty(&it);
+}
+
+}  // namespace
+
 bool Isolate::GetStackTraceLimit(Isolate* isolate, int* result) {
   if (v8_flags.correctness_fuzzer_suppressions) return false;
   DirectHandle<JSObject> error = isolate->error_function();
 
   DirectHandle<String> key = isolate->factory()->stackTraceLimit_string();
-  DirectHandle<Object> stack_trace_limit =
-      JSReceiver::GetDataProperty(isolate, error, key);
+  DirectHandle<Object> stack_trace_limit;
+  if (V8_LIKELY(error->HasFastProperties())) {
+    DirectHandle<Map> map(error->map(), isolate);
+    DirectHandle<DescriptorArray> descriptors(map->instance_descriptors(),
+                                               isolate);
+    InternalIndex descriptor = InternalIndex::NotFound();
+    PropertyDetails details = PropertyDetails::Empty();
+    {
+      DisallowGarbageCollection no_gc;
+      descriptor = descriptors->SearchWithCache(isolate, *key, *map);
+      if (descriptor.is_found()) details = descriptors->GetDetails(descriptor);
+    }
+    if (V8_LIKELY(descriptor.is_found() &&
+                  details.kind() == PropertyKind::kData)) {
+      if (V8_LIKELY(details.location() == PropertyLocation::kField)) {
+        stack_trace_limit = JSObject::FastPropertyAt(
+            isolate, error, details.representation(),
+            FieldIndex::ForDetails(*map, details));
+      } else {
+        stack_trace_limit = direct_handle(
+            descriptors->GetStrongValue(descriptor), isolate);
+      }
+    } else if (descriptor.is_found()) {
+      stack_trace_limit =
+          GetStackTraceLimitSlowPath(isolate, error, key, descriptor);
+    } else {
+      stack_trace_limit = JSReceiver::GetDataProperty(isolate, error, key);
+    }
+  } else {
+    stack_trace_limit = GetStackTraceLimitSlowPath(
+        isolate, error, key, InternalIndex::NotFound());
+  }
   if (!IsNumber(*stack_trace_limit)) return false;
 
   // Ensure that limit is not negative.
