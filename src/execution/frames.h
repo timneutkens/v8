@@ -1171,6 +1171,14 @@ class StubFrame : public TypedFrame {
 
 class OptimizedJSFrame : public JavaScriptFrame {
  public:
+  struct CallSiteBuilderFrameData {
+    Handle<Object> receiver;
+    Handle<JSFunction> function;
+    Handle<BytecodeArray> bytecode_array;
+    int bytecode_offset = 0;
+    bool is_constructor = false;
+  };
+
   // Return a list with {SharedFunctionInfo} objects of this frame.
   // The functions are ordered bottom-to-top (i.e. functions.last()
   // is the top-most activation)
@@ -1182,15 +1190,16 @@ class OptimizedJSFrame : public JavaScriptFrame {
   void SummarizeInto(FrameSummaries* summaries,
                      AllowAllocation allow_allocation = AllowAllocation{
                          true}) const;
-  struct CallSiteBuilderFrameData {
-    Handle<Object> receiver;
-    Handle<JSFunction> function;
-    Handle<BytecodeArray> bytecode_array;
-    int bytecode_offset = 0;
-    bool is_constructor = false;
-  };
+  bool SummarizeIntoFromLookup(FrameSummaries* summaries,
+                               DirectHandle<Code> code,
+                               Tagged<DeoptimizationData> data,
+                               int deopt_index,
+                               DeoptimizationData::BytecodeOffsetInfo
+                                   bytecode_offset_info,
+                               AllowAllocation allow_allocation) const;
   bool TryGetSingleInterpretedFrameForCallSiteBuilder(
-      CallSiteBuilderFrameData* frame_data) const;
+      std::optional<CallSiteBuilderFrameData>* frame_data,
+      FrameSummaries* fallback_summaries) const;
 
   Tagged<DeoptimizationData> GetDeoptimizationData(Tagged<Code> code,
                                                    int* deopt_index) const;

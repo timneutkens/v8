@@ -1032,13 +1032,14 @@ class CallSiteBuilder {
   bool VisitOptimized(
       OptimizedJSFrame::CallSiteBuilderFrameData const& frame_data) {
     if (Full()) return false;
-    if (!IsVisibleInStackTraceSecurityChecked(frame_data.function)) {
+    Tagged<SharedFunctionInfo> shared = frame_data.function->shared();
+    if (!IsVisibleInStackTraceSecurityChecked(frame_data.function, shared)) {
       skipped_prev_frame_ = true;
       return true;
     }
 
     int flags = 0;
-    if (IsStrictFrame(frame_data.function)) flags |= CallSiteInfo::kIsStrict;
+    if (IsStrictFrame(shared)) flags |= CallSiteInfo::kIsStrict;
     if (frame_data.is_constructor) flags |= CallSiteInfo::kIsConstructor;
 
     AppendFrame(Cast<UnionOf<JSAny, Hole>>(frame_data.receiver),
@@ -1049,12 +1050,13 @@ class CallSiteBuilder {
 
   void AppendAsyncFrame(DirectHandle<JSGeneratorObject> generator_object) {
     DirectHandle<JSFunction> function(generator_object->function(), isolate_);
-    if (!IsVisibleInStackTrace(function)) {
+    Tagged<SharedFunctionInfo> shared = function->shared();
+    if (!IsVisibleInStackTrace(function, shared)) {
       skipped_prev_frame_ = true;
       return;
     }
     int flags = CallSiteInfo::kIsAsync;
-    if (IsStrictFrame(function)) flags |= CallSiteInfo::kIsStrict;
+    if (IsStrictFrame(shared)) flags |= CallSiteInfo::kIsStrict;
 
     DirectHandle<JSAny> receiver(generator_object->receiver(), isolate_);
     DirectHandle<BytecodeArray> code(
@@ -1066,7 +1068,8 @@ class CallSiteBuilder {
 
   void AppendPromiseCombinatorFrame(DirectHandle<JSFunction> element_function,
                                     DirectHandle<JSFunction> combinator) {
-    if (!IsVisibleInStackTrace(combinator)) {
+    Tagged<SharedFunctionInfo> shared = combinator->shared();
+    if (!IsVisibleInStackTrace(combinator, shared)) {
       skipped_prev_frame_ = true;
       return;
     }
@@ -1088,15 +1091,16 @@ class CallSiteBuilder {
 
   void AppendJavaScriptFrame(
       FrameSummary::JavaScriptFrameSummary const& summary) {
+    DirectHandle<JSFunction> function = summary.function();
+    Tagged<SharedFunctionInfo> shared = function->shared();
     // Filter out internal frames that we do not want to show.
-    if (!IsVisibleInStackTraceSecurityChecked(summary.function())) {
+    if (!IsVisibleInStackTraceSecurityChecked(function, shared)) {
       skipped_prev_frame_ = true;
       return;
     }
 
     int flags = 0;
-    DirectHandle<JSFunction> function = summary.function();
-    if (IsStrictFrame(function)) flags |= CallSiteInfo::kIsStrict;
+    if (IsStrictFrame(shared)) flags |= CallSiteInfo::kIsStrict;
     if (summary.is_constructor()) flags |= CallSiteInfo::kIsConstructor;
 
     AppendFrame(Cast<UnionOf<JSAny, Hole>>(summary.receiver()), function,
@@ -1161,25 +1165,25 @@ class CallSiteBuilder {
   // The stack trace API should not expose receivers and function
   // objects on frames deeper than the top-most one with a strict mode
   // function.
-  bool IsStrictFrame(DirectHandle<JSFunction> function) {
+  bool IsStrictFrame(Tagged<SharedFunctionInfo> shared) {
     if (!encountered_strict_function_) {
-      encountered_strict_function_ =
-          is_strict(function->shared()->language_mode());
+      encountered_strict_function_ = is_strict(shared->language_mode());
     }
     return encountered_strict_function_;
   }
 
   // Determines whether the given stack frame should be displayed in a stack
   // trace.
-  bool IsVisibleInStackTrace(DirectHandle<JSFunction> function) {
-    return ShouldIncludeFrame(function) && IsNotHidden(function) &&
+  bool IsVisibleInStackTrace(DirectHandle<JSFunction> function,
+                             Tagged<SharedFunctionInfo> shared) {
+    return ShouldIncludeFrame(function) && IsNotHidden(shared) &&
            function->native_context()->HasSameSecurityTokenAs(
                isolate_->raw_native_context());
   }
 
   bool IsVisibleInStackTraceSecurityChecked(
-      DirectHandle<JSFunction> function) {
-    return ShouldIncludeFrame(function) && IsNotHidden(function);
+      DirectHandle<JSFunction> function, Tagged<SharedFunctionInfo> shared) {
+    return ShouldIncludeFrame(function) && IsNotHidden(shared);
   }
 
   // This mechanism excludes a number of uninteresting frames from the stack
@@ -1204,38 +1208,68 @@ class CallSiteBuilder {
     UNREACHABLE();
   }
 
-  bool IsNotHidden(DirectHandle<JSFunction> function) {
+  bool IsNotHidden(Tagged<SharedFunctionInfo> shared) {
+    // Parsed user JavaScript cannot carry API function template data, and is
+    // visible regardless of the builtin-frame flag.
+    if (V8_LIKELY(shared->IsUserJavaScript())) {
+      DCHECK(!shared->IsApiFunction());
+      return true;
+    }
     // TODO(szuend): Remove this check once the flag is enabled
     //               by default.
     if (!v8_flags.experimental_stack_trace_frames &&
-        function->shared()->IsApiFunction()) {
+        shared->IsApiFunction()) {
       return false;
     }
     // Functions defined not in user scripts are not visible unless directly
     // exposed, in which case the native flag is set.
     // The --builtins-in-stack-traces command line flag allows including
     // internal call sites in the stack trace for debugging purposes.
-    if (!v8_flags.builtins_in_stack_traces &&
-        !function->shared()->IsUserJavaScript()) {
-      return function->shared()->native() ||
-             function->shared()->IsApiFunction();
+    if (!v8_flags.builtins_in_stack_traces) {
+      return shared->native() || shared->IsApiFunction();
     }
     return true;
   }
 
  public:
+  // Append an interpreter frame directly, avoiding the temporary
+  // FrameSummary/FrameSummaries representation used by the generic walker.
+  // The caller performs the cross-origin check before this method so frame
+  // skipping has exactly the same ordering as the generic path.
+  V8_NOINLINE bool AppendInterpretedFrame(
+      InterpretedFrame* frame, DirectHandle<JSFunction> function) {
+    if (Full()) return false;
+    Tagged<SharedFunctionInfo> shared = function->shared();
+    if (!IsVisibleInStackTrace(function, shared)) {
+      skipped_prev_frame_ = true;
+      return true;
+    }
+
+    int flags = 0;
+    if (IsStrictFrame(shared)) flags |= CallSiteInfo::kIsStrict;
+    if (frame->IsConstructor()) flags |= CallSiteInfo::kIsConstructor;
+
+    DirectHandle<UnionOf<JSAny, Hole>> receiver(
+        Cast<UnionOf<JSAny, Hole>>(frame->receiver()), isolate_);
+    DirectHandle<BytecodeArray> bytecode(frame->GetBytecodeArray(), isolate_);
+    int bytecode_offset = frame->GetBytecodeOffset();
+    AppendFrame(receiver, function, bytecode, bytecode_offset, flags);
+    return true;
+  }
+
   // Store a deferred entry for a baseline frame.
   // Stores the Code + raw PC offset; bytecode offset resolution
   // happens lazily in ExpandDeferredFrames().
   bool AppendDeferredFrame(JavaScriptFrame* frame, int deferred_flag) {
     if (Full()) return false;
     DirectHandle<JSFunction> function(frame->function(), isolate_);
-    if (!IsVisibleInStackTrace(function)) {
+    Tagged<SharedFunctionInfo> shared = function->shared();
+    if (!IsVisibleInStackTrace(function, shared)) {
       skipped_prev_frame_ = true;
       return true;
     }
     int flags = deferred_flag;
-    if (IsStrictFrame(function)) flags |= CallSiteInfo::kIsStrict;
+    if (IsStrictFrame(shared)) flags |= CallSiteInfo::kIsStrict;
     if (frame->IsConstructor()) flags |= CallSiteInfo::kIsConstructor;
 
     Tagged<Code> code = frame->LookupCode();
@@ -1641,6 +1675,7 @@ void VisitStack_ForCallSiteBuilder(Isolate* isolate, CallSiteBuilder* visitor) {
   // frames. Used to correctly attribute construct-call flags.
   bool skipped_last_frame = true;
   FrameSummaries optimized_summaries;
+  FrameSummaries other_summaries;
   for (StackFrameIterator it(isolate); !it.done(); it.Advance()) {
     StackFrame* frame = it.frame();
     switch (frame->type()) {
@@ -1654,6 +1689,23 @@ void VisitStack_ForCallSiteBuilder(Isolate* isolate, CallSiteBuilder* visitor) {
         }
         skipped_last_frame = true;
         break;
+      case StackFrame::INTERPRETED: {
+        InterpretedFrame* interpreted = InterpretedFrame::cast(frame);
+        DirectHandle<JSFunction> function(interpreted->function(), isolate);
+        // The generic path checks the summary's native context before
+        // CallSiteBuilder applies skip/visibility state. Preserve that order.
+        if (!function->native_context()->HasSameSecurityTokenAs(
+                isolate->raw_native_context())) {
+          skipped_last_frame = true;
+          break;
+        }
+        if (!visitor->AppendInterpretedFrame(interpreted, function)) return;
+        // Match the generic one-summary path: a same-origin frame counts as
+        // visited here even when CallSiteBuilder filters it; skipped_prev_frame_
+        // guards constructor lookahead in that case.
+        skipped_last_frame = false;
+        break;
+      }
       case StackFrame::API_CALLBACK_EXIT:
       case StackFrame::API_CONSTRUCT_EXIT:
       case StackFrame::BUILTIN_EXIT:
@@ -1661,7 +1713,6 @@ void VisitStack_ForCallSiteBuilder(Isolate* isolate, CallSiteBuilder* visitor) {
       case StackFrame::JAVASCRIPT_BUILTIN_CONTINUATION_WITH_CATCH:
       case StackFrame::TURBOFAN_JS:
       case StackFrame::MAGLEV:
-      case StackFrame::INTERPRETED:
       case StackFrame::BUILTIN:
 #if V8_ENABLE_WEBASSEMBLY
       case StackFrame::STUB:
@@ -1672,19 +1723,20 @@ void VisitStack_ForCallSiteBuilder(Isolate* isolate, CallSiteBuilder* visitor) {
 #endif  // V8_ENABLE_DRUMBRAKE
 #endif  // V8_ENABLE_WEBASSEMBLY
       {
+        std::optional<OptimizedJSFrame::CallSiteBuilderFrameData> frame_data;
         if (frame->is_optimized_js()) {
-          OptimizedJSFrame::CallSiteBuilderFrameData frame_data;
           if (static_cast<OptimizedJSFrame*>(frame)
                   ->TryGetSingleInterpretedFrameForCallSiteBuilder(
-                      &frame_data)) {
+                      &frame_data, &optimized_summaries)) {
             skipped_last_frame = true;
-            if (!frame_data.function
+            DCHECK(frame_data.has_value());
+            if (!frame_data->function
                      ->native_context()
                      ->HasSameSecurityTokenAs(
                          isolate->raw_native_context())) {
               break;
             }
-            if (!visitor->VisitOptimized(frame_data)) return;
+            if (!visitor->VisitOptimized(*frame_data)) return;
             skipped_last_frame = false;
             break;
           }
@@ -1692,11 +1744,8 @@ void VisitStack_ForCallSiteBuilder(Isolate* isolate, CallSiteBuilder* visitor) {
 
         // A standard frame may include many summarized frames (due to
         // inlining).
-        FrameSummaries other_summaries;
         FrameSummaries* summaries;
         if (frame->is_optimized_js()) {
-          static_cast<OptimizedJSFrame*>(frame)->SummarizeInto(
-              &optimized_summaries);
           summaries = &optimized_summaries;
         } else {
           other_summaries = CommonFrame::cast(frame)->Summarize();
