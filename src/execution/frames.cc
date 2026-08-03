@@ -3397,16 +3397,20 @@ Tagged<DeoptimizationData> OptimizedJSFrame::GetDeoptimizationDataForPC(
     Isolate* isolate, Tagged<Code> code, Address pc, int* deopt_index) {
   DCHECK(code->contains(isolate, pc));
   DCHECK(CodeKindCanDeoptimize(code->kind()));
+  InnerPointerToCodeCache::Entry* entry =
+      isolate->inner_pointer_to_code_cache()->GetCacheEntry(pc);
+  CHECK(entry->code.has_value());
+  DCHECK_EQ(entry->code.value(), code);
   if (code->is_maglevved()) {
-    MaglevSafepointTable table(isolate, pc, code);
-    MaglevSafepointEntry safepoint_entry = table.FindEntry(pc);
+    MaglevSafepointEntry& safepoint_entry =
+        GetMaglevSafepointEntryFromCodeCache(isolate, pc, entry);
     if (safepoint_entry.has_deoptimization_index()) {
       *deopt_index = safepoint_entry.deoptimization_index();
       return code->deoptimization_data();
     }
   } else {
-    SafepointTable table(isolate, pc, code);
-    SafepointEntry& safepoint_entry = table.FindEntry_NoStackSlots(pc);
+    SafepointEntry& safepoint_entry =
+        GetSafepointEntryFromCodeCache(isolate, pc, entry);
     if (safepoint_entry.has_deoptimization_index()) {
       *deopt_index = safepoint_entry.deoptimization_index();
       return code->deoptimization_data();
