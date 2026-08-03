@@ -3149,11 +3149,42 @@ FrameSummaries OptimizedJSFrame::Summarize(
     DisallowGarbageCollection no_gc;
     DeoptimizationFrameTranslation::Iterator it(
         data->FrameTranslation(), data->TranslationIndex(deopt_index).value());
+    auto begin = it.EnterBeginOpcode();
+    std::optional<TranslationOpcode> prefetched_opcode;
+
+    // The deoptimization entry already stores the bytecode offset for the
+    // sole interpreter frame. Use the live frame's function and receiver
+    // directly instead of decoding the rest of the translation. A sole
+    // JavaScript builtin continuation also has frame counts of 1/1, so inspect
+    // the opcode before taking this path.
+    if (begin.total_frame_count == 1 && begin.js_frame_count == 1) {
+      prefetched_opcode = it.SeekNextFrame();
+      if (IsTranslationInterpreterFrameOpcode(*prefetched_opcode)) {
+        DirectHandle<AbstractCode> abstract_code(
+            Cast<AbstractCode>(
+                function()->shared()->GetBytecodeArray(isolate())),
+            isolate());
+        FrameSummary::JavaScriptFrameSummary summary(
+            isolate(), receiver(), function(), *abstract_code,
+            data->GetBytecodeOffsetOrBuiltinContinuationId(deopt_index)
+                .ToInt(),
+            IsConstructor());
+        summaries.frames.push_back(summary);
+        return summaries;
+      }
+    }
+
     bool is_constructor = IsConstructor();
-    int remaining = it.EnterBeginOpcode().total_frame_count;
+    int remaining = begin.total_frame_count;
 
     while (remaining > 0) {
-      TranslationOpcode opcode = it.SeekNextFrame();
+      TranslationOpcode opcode;
+      if (prefetched_opcode.has_value()) {
+        opcode = *prefetched_opcode;
+        prefetched_opcode.reset();
+      } else {
+        opcode = it.SeekNextFrame();
+      }
       remaining--;
 
       if (opcode == TranslationOpcode::CONSTRUCT_CREATE_STUB_FRAME ||
