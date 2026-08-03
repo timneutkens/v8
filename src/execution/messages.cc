@@ -593,9 +593,37 @@ MaybeHandle<JSObject> ErrorUtils::Construct(
     DirectHandle<String> msg_string;
     ASSIGN_RETURN_ON_EXCEPTION(isolate, msg_string,
                                Object::ToString(isolate, message));
-    RETURN_ON_EXCEPTION(isolate, JSObject::SetOwnPropertyIgnoreAttributes(
-                                     err, isolate->factory()->message_string(),
-                                     msg_string, DONT_ENUM));
+    bool stored_message = false;
+    if (V8_LIKELY(IsJSError(*err) && err->HasFastProperties())) {
+      DirectHandle<Map> old_map =
+          Map::Update(isolate, direct_handle(err->map(), isolate));
+      // Map::Update can move a deprecated fast map to dictionary mode. Also
+      // leave prototype maps to LookupIterator, which owns prototype-chain
+      // invalidation. Fresh Error instances normally satisfy every guard.
+      if (V8_LIKELY(!old_map->is_dictionary_map() &&
+                    !old_map->is_prototype_map() &&
+                    old_map->is_extensible())) {
+        DCHECK(!IsSpecialReceiverMap(*old_map));
+        DirectHandle<Map> new_map = Map::TransitionToDataProperty(
+            isolate, old_map, isolate->factory()->message_string(), msg_string,
+            DONT_ENUM, PropertyConstness::kConst, StoreOrigin::kNamed);
+        if (V8_LIKELY(!new_map->is_dictionary_map())) {
+          JSObject::MigrateToMap(isolate, err, new_map);
+          InternalIndex descriptor = new_map->LastAdded();
+          err->WriteToField(descriptor,
+                            new_map->GetLastDescriptorDetails(), *msg_string);
+#if VERIFY_HEAP
+          if (v8_flags.verify_heap) err->HeapObjectVerify(isolate);
+#endif
+          stored_message = true;
+        }
+      }
+    }
+    if (!stored_message) {
+      RETURN_ON_EXCEPTION(isolate, JSObject::SetOwnPropertyIgnoreAttributes(
+                                       err, isolate->factory()->message_string(),
+                                       msg_string, DONT_ENUM));
+    }
 
     if (v8_flags.use_original_message_for_stack_trace) {
       RETURN_ON_EXCEPTION(isolate,
