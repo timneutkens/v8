@@ -189,6 +189,7 @@ StackFrameIterator::StackFrameIterator(Isolate* isolate,
 
 void StackFrameIterator::Advance() {
   DCHECK(!done());
+  const StackFrame::Type current_type = frame_->type();
   // Compute the state of the calling frame before restoring
   // callee-saved registers and unwinding handlers. This allows the
   // frame code that computes the caller state to access the top
@@ -197,11 +198,11 @@ void StackFrameIterator::Advance() {
   StackFrame::Type type;
   state.iteration_depth = frame_->iteration_depth() + 1;
 #if V8_ENABLE_WEBASSEMBLY
-  if (((frame_->type() == StackFrame::WASM_JSPI &&
+  if (((current_type == StackFrame::WASM_JSPI &&
         Memory<Address>(frame_->fp() +
                         WasmJspiFrameConstants::kCallerFPOffset) ==
             kNullAddress) ||
-       frame_->type() == StackFrame::WASM_STACK_ENTRY) &&
+       current_type == StackFrame::WASM_STACK_ENTRY) &&
       !first_stack_only_) {
     // Handle stack switches here.
     // For JSPI, both the parent stack exit frame and child stack entry frame
@@ -214,9 +215,9 @@ void StackFrameIterator::Advance() {
     type = StackFrame::MarkerToType(
         Memory<intptr_t>(wasm_stack_->jmpbuf()->fp +
                          CommonFrameConstants::kContextOrFrameTypeOffset));
-    DCHECK((frame_->type() == StackFrame::WASM_JSPI &&
+    DCHECK((current_type == StackFrame::WASM_JSPI &&
             type == StackFrame::WASM_JSPI) ||
-           (frame_->type() == StackFrame::WASM_STACK_ENTRY &&
+           (current_type == StackFrame::WASM_STACK_ENTRY &&
             type == StackFrame::WASM_STACK_EXIT));
     SetNewFrame(type, &state);
     return;
@@ -228,10 +229,10 @@ void StackFrameIterator::Advance() {
   // to higher addresses as we iterate the stack. This breaks with
   // stack-switching, so only unwind the stack handlers for frames that are
   // known to use them.
-  if (frame_->type() == StackFrame::ENTRY ||
-      frame_->type() == StackFrame::CONSTRUCT_ENTRY
+  if (current_type == StackFrame::ENTRY ||
+      current_type == StackFrame::CONSTRUCT_ENTRY
 #if V8_ENABLE_WEBASSEMBLY
-      || frame_->type() == StackFrame::C_WASM_ENTRY
+      || current_type == StackFrame::C_WASM_ENTRY
 #endif
   ) {
     StackHandlerIterator it(frame_, handler_);
