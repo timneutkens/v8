@@ -5,6 +5,7 @@
 #ifndef V8_EXECUTION_FRAMES_H_
 #define V8_EXECUTION_FRAMES_H_
 
+#include <limits>
 #include <optional>
 #include <tuple>
 
@@ -181,6 +182,9 @@ class StackFrame {
   static_assert((OUTERMOST_JSENTRY_FRAME & kHeapObjectTagMask) !=
                 kHeapObjectTag);
 
+  static constexpr uint16_t kNoInnerPointerToCodeCacheIndex =
+      std::numeric_limits<uint16_t>::max();
+
   struct State {
     Address sp = kNullAddress;
     Address fp = kNullAddress;
@@ -190,6 +194,9 @@ class StackFrame {
     Address* constant_pool_address = nullptr;
     bool is_profiler_entry_frame = false;
     bool is_stack_exit_frame = false;
+    // Occupies the existing two-byte padding before iteration_depth.
+    uint16_t inner_pointer_to_code_cache_index =
+        kNoInnerPointerToCodeCacheIndex;
     // The iteration depth of StackFrameIterator,
     // see StackFrameIterator::Advance.
     uint32_t iteration_depth = 0;
@@ -320,6 +327,9 @@ class StackFrame {
     return state_.is_profiler_entry_frame;
   }
   bool is_stack_exit_frame() const { return state_.is_stack_exit_frame; }
+  uint16_t inner_pointer_to_code_cache_index() const {
+    return state_.inner_pointer_to_code_cache_index;
+  }
 
   // Skip authentication of the PC, when using CFI. Used in the profiler, where
   // in certain corner-cases we do not use an address on the stack, which would
@@ -1199,7 +1209,8 @@ class OptimizedJSFrame : public JavaScriptFrame {
                                AllowAllocation allow_allocation) const;
   bool TryGetSingleInterpretedFrameForCallSiteBuilder(
       std::optional<CallSiteBuilderFrameData>* frame_data,
-      FrameSummaries* fallback_summaries) const;
+      FrameSummaries* fallback_summaries,
+      uint16_t inner_pointer_to_code_cache_index) const;
 
   Tagged<DeoptimizationData> GetDeoptimizationData(Tagged<Code> code,
                                                    int* deopt_index) const;
