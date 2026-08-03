@@ -1042,9 +1042,9 @@ class CallSiteBuilder {
     if (IsStrictFrame(shared)) flags |= CallSiteInfo::kIsStrict;
     if (frame_data.is_constructor) flags |= CallSiteInfo::kIsConstructor;
 
-    AppendFrame(Cast<UnionOf<JSAny, Hole>>(frame_data.receiver),
-                frame_data.function, frame_data.bytecode_array,
-                frame_data.bytecode_offset, flags);
+    AppendBytecodeFrame(frame_data.receiver, frame_data.function,
+                        frame_data.bytecode_array, frame_data.bytecode_offset,
+                        flags);
     return true;
   }
 
@@ -1319,6 +1319,41 @@ class CallSiteBuilder {
                      *isolate_->factory()->undefined_value());
     }
 
+    elements_->set(base_index + CallSiteInfo::Fields::kOffset,
+                   Smi::FromInt(offset));
+
+    index_++;
+    skipped_prev_frame_ = false;
+  }
+
+  // These paths already have a statically known BytecodeArray. Avoid routing
+  // it through the generic Code/BytecodeArray/Undefined union and TryCast
+  // dispatch while retaining normal handles and array growth semantics.
+  void AppendBytecodeFrame(
+      DirectHandle<UnionOf<JSAny, Hole>> receiver,
+      DirectHandle<JSFunction> function,
+      DirectHandle<BytecodeArray> bytecode_array, int offset, int flags) {
+    if (IsTheHole(*receiver)) {
+      receiver = isolate_->factory()->undefined_value();
+    }
+
+    int base_index = index_ * CallSiteInfo::Fields::kCount;
+
+    static_assert(CallSiteInfo::Fields::kFlags ==
+                  CallSiteInfo::Fields::kCount - 1);
+    int flags_index = base_index + CallSiteInfo::Fields::kFlags;
+    if (V8_LIKELY(static_cast<uint32_t>(flags_index) <
+                  elements_->ulength().value())) {
+      elements_->set(flags_index, Smi::FromInt(flags));
+    } else {
+      elements_ = FixedArray::SetAndGrow(isolate_, elements_, flags_index,
+                                         Smi::FromInt(flags));
+    }
+
+    elements_->set(base_index + CallSiteInfo::Fields::kReceiver, *receiver);
+    elements_->set(base_index + CallSiteInfo::Fields::kFunction, *function);
+    elements_->set(base_index + CallSiteInfo::Fields::kCode,
+                   bytecode_array->wrapper());
     elements_->set(base_index + CallSiteInfo::Fields::kOffset,
                    Smi::FromInt(offset));
 

@@ -1182,9 +1182,9 @@ class StubFrame : public TypedFrame {
 class OptimizedJSFrame : public JavaScriptFrame {
  public:
   struct CallSiteBuilderFrameData {
-    Handle<Object> receiver;
-    Handle<JSFunction> function;
-    Handle<BytecodeArray> bytecode_array;
+    DirectHandle<UnionOf<JSAny, Hole>> receiver;
+    DirectHandle<JSFunction> function;
+    DirectHandle<BytecodeArray> bytecode_array;
     int bytecode_offset = 0;
     bool is_constructor = false;
   };
