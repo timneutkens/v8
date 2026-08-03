@@ -1735,7 +1735,7 @@ DirectHandle<StackTraceInfo> GetDetailedStackTraceFromCallSiteInfos(
 
 MaybeDirectHandle<JSObject> Isolate::CaptureAndSetErrorStack(
     DirectHandle<JSObject> error_object, FrameSkipMode mode,
-    Handle<Object> caller) {
+    Handle<Object> caller, bool fresh_error_object) {
   TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"),
               perfetto::StaticString(__func__));
   Handle<UnionOf<Undefined, FixedArray>> call_site_infos_or_formatted_stack =
@@ -1812,8 +1812,12 @@ MaybeDirectHandle<JSObject> Isolate::CaptureAndSetErrorStack(
                 error_object->HasFastProperties())) {
     Tagged<Map> map = error_object->map();
     DCHECK_GT(map->GetInObjectProperties(), 0);
-    error_object->FastPropertyAtPut(
-        FieldIndex::ForPropertyIndex(map, 0), *error_stack);
+    // A fresh JSError's reserved stack slot is initialized to undefined. If
+    // stack collection is disabled, avoid rewriting the same value.
+    if (V8_LIKELY(!fresh_error_object || !IsUndefined(*error_stack))) {
+      error_object->FastPropertyAtPut(
+          FieldIndex::ForPropertyIndex(map, 0), *error_stack);
+    }
   } else {
     RETURN_ON_EXCEPTION(
         this,
