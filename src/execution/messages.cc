@@ -17,6 +17,7 @@
 #include "src/handles/maybe-handles.h"
 #include "src/logging/runtime-call-stats-scope.h"
 #include "src/objects/call-site-info-inl.h"
+#include "src/objects/field-index-inl.h"
 #include "src/objects/foreign-inl.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/property-descriptor.h"
@@ -598,10 +599,17 @@ MaybeHandle<JSObject> ErrorUtils::Construct(
                                      msg_string, DONT_ENUM));
 
     if (v8_flags.use_original_message_for_stack_trace) {
-      RETURN_ON_EXCEPTION(isolate,
-                          JSObject::SetOwnPropertyIgnoreAttributes(
-                              err, isolate->factory()->error_message_symbol(),
-                              msg_string, DONT_ENUM));
+      if (V8_LIKELY(IsJSError(*err) && err->HasFastProperties())) {
+        Tagged<Map> map = err->map();
+        DCHECK_GT(map->GetInObjectProperties(), 1);
+        err->FastPropertyAtPut(FieldIndex::ForPropertyIndex(map, 1),
+                               *msg_string);
+      } else {
+        RETURN_ON_EXCEPTION(isolate,
+                            JSObject::SetOwnPropertyIgnoreAttributes(
+                                err, isolate->factory()->error_message_symbol(),
+                                msg_string, DONT_ENUM));
+      }
     }
   }
 
