@@ -3140,6 +3140,21 @@ FrameSummaries OptimizedJSFrame::Summarize(
   // This avoids the expensive TranslatedState::Init + Prepare path that
   // would parse every value in every inlined frame.
 
+  DeoptimizationData::BytecodeOffsetInfo bytecode_offset_info =
+      data->GetBytecodeOffsetInfo(deopt_index);
+  if (bytecode_offset_info.is_single_interpreted_frame) {
+    DCHECK_GT(data->ProtectedLiteralArray()->length(), 0);
+    DirectHandle<AbstractCode> abstract_code(
+        Cast<AbstractCode>(SbxCast<BytecodeArray>(
+            data->ProtectedLiteralArray()->get(0))),
+        isolate());
+    FrameSummary::JavaScriptFrameSummary summary(
+        isolate(), receiver(), function(), *abstract_code,
+        bytecode_offset_info.bytecode_offset.ToInt(), IsConstructor());
+    summaries.frames.push_back(summary);
+    return summaries;
+  }
+
   Tagged<DeoptimizationLiteralArray> literal_array = data->LiteralArray();
 
   // Lightweight walk: resolve function and receiver from live frame headers
@@ -3149,8 +3164,10 @@ FrameSummaries OptimizedJSFrame::Summarize(
     DisallowGarbageCollection no_gc;
     DeoptimizationFrameTranslation::Iterator it(
         data->FrameTranslation(), data->TranslationIndex(deopt_index).value());
+    auto begin = it.EnterBeginOpcode();
+
     bool is_constructor = IsConstructor();
-    int remaining = it.EnterBeginOpcode().total_frame_count;
+    int remaining = begin.total_frame_count;
 
     while (remaining > 0) {
       TranslationOpcode opcode = it.SeekNextFrame();
@@ -3182,12 +3199,13 @@ FrameSummaries OptimizedJSFrame::Summarize(
                          JAVASCRIPT_BUILTIN_CONTINUATION_WITH_CATCH_FRAME);
 
       int bytecode_offset = it.NextOperand();
-      int sfi_id = it.NextOperand();
-      Tagged<SharedFunctionInfo> sfi =
-          Cast<SharedFunctionInfo>(literal_array->get(sfi_id));
+      it.NextOperand();  // SharedFunctionInfo literal id.
+      int bytecode_array_id = -1;
+      if (!is_builtin_cont) bytecode_array_id = it.NextOperand();
 
       // Skip remaining header operands to reach the values.
-      it.SkipOperands(TranslationOpcodeOperandCount(opcode) - 2);
+      it.SkipOperands(TranslationOpcodeOperandCount(opcode) -
+                      (is_builtin_cont ? 2 : 3));
 
       // Resolve closure and receiver from the live frame.  The closure is
       // always tagged (LITERAL or TAGGED_STACK_SLOT), but the receiver is
@@ -3215,7 +3233,8 @@ FrameSummaries OptimizedJSFrame::Summarize(
                 BytecodeOffset(bytecode_offset))));
       } else {
         code_offset = bytecode_offset;
-        abstract_code = Cast<AbstractCode>(sfi->GetBytecodeArray(isolate()));
+        abstract_code = Cast<AbstractCode>(SbxCast<BytecodeArray>(
+            data->ProtectedLiteralArray()->get(bytecode_array_id)));
       }
 
       FrameSummary::JavaScriptFrameSummary summary(

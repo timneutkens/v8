@@ -242,6 +242,7 @@ class DeoptimizationExit : public ZoneObject {
   explicit DeoptimizationExit(SourcePosition pos, BytecodeOffset bailout_id,
                               int translation_id, int pc_offset,
                               DeoptimizeKind kind, DeoptimizeReason reason,
+                              bool is_single_interpreted_frame,
                               NodeId node_id)
       : deoptimization_id_(kNoDeoptIndex),
         pos_(pos),
@@ -252,6 +253,7 @@ class DeoptimizationExit : public ZoneObject {
         reason_(reason),
         node_id_(node_id),
         immediate_args_(nullptr),
+        is_single_interpreted_frame_(is_single_interpreted_frame),
         emitted_(false) {}
 
   bool has_deoptimization_id() const {
@@ -275,6 +277,9 @@ class DeoptimizationExit : public ZoneObject {
   DeoptimizeKind kind() const { return kind_; }
   DeoptimizeReason reason() const { return reason_; }
   NodeId node_id() const { return node_id_; }
+  bool is_single_interpreted_frame() const {
+    return is_single_interpreted_frame_;
+  }
   const ZoneVector<ImmediateOperand*>* immediate_args() const {
     return immediate_args_;
   }
@@ -300,6 +305,7 @@ class DeoptimizationExit : public ZoneObject {
   const DeoptimizeReason reason_;
   const NodeId node_id_;
   ZoneVector<ImmediateOperand*>* immediate_args_;
+  const bool is_single_interpreted_frame_;
   bool emitted_;
 };
 

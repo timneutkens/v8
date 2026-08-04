@@ -50,11 +50,25 @@ Tagged<SharedFunctionInfo> DeoptimizationData::GetSharedFunctionInfo() const {
 
 BytecodeOffset DeoptimizationData::GetBytecodeOffsetOrBuiltinContinuationId(
     int i) const {
-  return BytecodeOffset(BytecodeOffsetRaw(i).value());
+  return GetBytecodeOffsetInfo(i).bytecode_offset;
 }
 
-void DeoptimizationData::SetBytecodeOffset(int i, BytecodeOffset value) {
-  SetBytecodeOffsetRaw(i, Smi::FromInt(value.ToInt()));
+DeoptimizationData::BytecodeOffsetInfo
+DeoptimizationData::GetBytecodeOffsetInfo(int i) const {
+  int raw = BytecodeOffsetRaw(i).value();
+  bool is_single_interpreted_frame = raw < 0;
+  int biased_offset = is_single_interpreted_frame ? ~raw : raw;
+  return {BytecodeOffset(biased_offset - 1),
+          is_single_interpreted_frame};
+}
+
+void DeoptimizationData::SetBytecodeOffset(
+    int i, BytecodeOffset value, bool is_single_interpreted_frame) {
+  DCHECK_GE(value.ToInt(), BytecodeOffset::None().ToInt());
+  DCHECK_LT(value.ToInt(), Smi::kMaxValue);
+  int biased_offset = value.ToInt() + 1;
+  int raw = is_single_interpreted_frame ? ~biased_offset : biased_offset;
+  SetBytecodeOffsetRaw(i, Smi::FromInt(raw));
 }
 
 uint32_t DeoptimizationData::DeoptCount() const {
