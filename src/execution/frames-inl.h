@@ -23,11 +23,13 @@ class InnerPointerToCodeCache final {
  public:
   struct Entry {
     enum Kind { kSafepoint, kMaglevSafepoint };
+    static constexpr int kUninitializedDeoptIndex = -2;
     Address inner_pointer{kNullAddress};
     // TODO(jkummerow): The std::optional needs 8 bytes to store presence of
     // the value; we could just use Smi::zero() as sentinel instead.
     std::optional<Tagged<GcSafeCode>> code;
     Kind safepoint_kind{kSafepoint};
+    int deopt_index{kUninitializedDeoptIndex};
     union {
       SafepointEntry safepoint_entry = {};
       MaglevSafepointEntry maglev_safepoint_entry;
@@ -75,8 +77,11 @@ class InnerPointerToCodeCache final {
         DCHECK_EQ(safepoint_kind, kMaglevSafepoint);
         maglev_safepoint_entry.Reset();
       }
+      deopt_index = kUninitializedDeoptIndex;
     }
   };
+
+  static_assert(sizeof(Entry) == 64);
 
   explicit InnerPointerToCodeCache(Isolate* isolate) : isolate_(isolate) {}
 
@@ -93,6 +98,7 @@ class InnerPointerToCodeCache final {
         slot.maglev_safepoint_entry.Reset();
       }
       slot.inner_pointer = kNullAddress;
+      slot.deopt_index = Entry::kUninitializedDeoptIndex;
     }
   }
 

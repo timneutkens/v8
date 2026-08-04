@@ -1702,6 +1702,13 @@ SafepointEntry& GetSafepointEntryFromCodeCache(
     DCHECK_EQ(entry->safepoint_entry, table.FindEntry(inner_pointer));
 #endif  // DEBUG
   }
+  int deopt_index = entry->safepoint_entry.has_deoptimization_index()
+                        ? entry->safepoint_entry.deoptimization_index()
+                        : SafepointEntry::kNoDeoptIndex;
+  DCHECK(entry->deopt_index ==
+             InnerPointerToCodeCache::Entry::kUninitializedDeoptIndex ||
+         entry->deopt_index == deopt_index);
+  entry->deopt_index = deopt_index;
   return entry->safepoint_entry;
 }
 
@@ -1720,7 +1727,59 @@ MaglevSafepointEntry& GetMaglevSafepointEntryFromCodeCache(
               MaglevSafepointTable::FindEntry(isolate, entry->code.value(),
                                               inner_pointer));
   }
+  int deopt_index = entry->maglev_safepoint_entry.has_deoptimization_index()
+                        ? entry->maglev_safepoint_entry.deoptimization_index()
+                        : SafepointEntry::kNoDeoptIndex;
+  DCHECK(entry->deopt_index ==
+             InnerPointerToCodeCache::Entry::kUninitializedDeoptIndex ||
+         entry->deopt_index == deopt_index);
+  entry->deopt_index = deopt_index;
   return entry->maglev_safepoint_entry;
+}
+
+int GetDeoptimizationIndexFromCachedEntry(
+    Isolate* isolate, Address inner_pointer,
+    InnerPointerToCodeCache::Entry* entry, bool is_maglev) {
+  if (entry->deopt_index !=
+      InnerPointerToCodeCache::Entry::kUninitializedDeoptIndex) {
+    return entry->deopt_index;
+  }
+
+  int deopt_index = SafepointEntry::kNoDeoptIndex;
+  if (is_maglev) {
+    entry->ToMaglevSafepoint();
+    if (entry->maglev_safepoint_entry.is_initialized()) {
+      if (entry->maglev_safepoint_entry.has_deoptimization_index()) {
+        deopt_index =
+            entry->maglev_safepoint_entry.deoptimization_index();
+      }
+    } else {
+      MaglevSafepointEntry safepoint_entry =
+          MaglevSafepointTable::FindEntry(isolate, entry->code.value(),
+                                          inner_pointer);
+      if (safepoint_entry.has_deoptimization_index()) {
+        deopt_index = safepoint_entry.deoptimization_index();
+      }
+    }
+  } else {
+    entry->ToSafepoint();
+    if (entry->safepoint_entry.is_initialized()) {
+      if (entry->safepoint_entry.has_deoptimization_index()) {
+        deopt_index = entry->safepoint_entry.deoptimization_index();
+      }
+    } else {
+      entry->safepoint_entry.ReleaseData();
+      SafepointTable table(isolate, inner_pointer, entry->code.value());
+      SafepointEntry& safepoint_entry =
+          table.FindEntry_NoStackSlots(inner_pointer);
+      if (safepoint_entry.has_deoptimization_index()) {
+        deopt_index = safepoint_entry.deoptimization_index();
+      }
+    }
+  }
+
+  entry->deopt_index = deopt_index;
+  return deopt_index;
 }
 
 Tagged<DeoptimizationData> GetDeoptimizationDataFromCachedEntry(
@@ -1731,23 +1790,11 @@ Tagged<DeoptimizationData> GetDeoptimizationDataFromCachedEntry(
   CHECK(entry->code.has_value());
   DCHECK_EQ(entry->inner_pointer, pc);
   DCHECK_EQ(entry->code.value(), code);
-  if (code->is_maglevved()) {
-    MaglevSafepointEntry& safepoint_entry =
-        GetMaglevSafepointEntryFromCodeCache(isolate, pc, entry);
-    if (safepoint_entry.has_deoptimization_index()) {
-      *deopt_index = safepoint_entry.deoptimization_index();
-      return code->deoptimization_data();
-    }
-  } else {
-    SafepointEntry& safepoint_entry =
-        GetSafepointEntryFromCodeCache(isolate, pc, entry);
-    if (safepoint_entry.has_deoptimization_index()) {
-      *deopt_index = safepoint_entry.deoptimization_index();
-      return code->deoptimization_data();
-    }
-  }
-  *deopt_index = SafepointEntry::kNoDeoptIndex;
-  return {};
+  *deopt_index = GetDeoptimizationIndexFromCachedEntry(
+      isolate, pc, entry, code->is_maglevved());
+  return *deopt_index == SafepointEntry::kNoDeoptIndex
+             ? Tagged<DeoptimizationData>{}
+             : code->deoptimization_data();
 }
 
 }  // namespace
