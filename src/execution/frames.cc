@@ -3184,9 +3184,10 @@ bool OptimizedJSFrame::TryGetSingleInterpretedFrameForCallSiteBuilder(
       data->ProtectedLiteralArray()->get(0));
 
   CallSiteBuilderFrameData& result = frame_data->emplace();
-  result.receiver = handle(receiver(), isolate());
-  result.function = handle(function(), isolate());
-  result.bytecode_array = handle(bytecode_array, isolate());
+  result.receiver =
+      direct_handle(Cast<UnionOf<JSAny, Hole>>(receiver()), isolate());
+  result.function = direct_handle(function(), isolate());
+  result.bytecode_array = direct_handle(bytecode_array, isolate());
   result.bytecode_offset = bytecode_offset_info.bytecode_offset.ToInt();
   result.is_constructor = IsConstructor();
   return true;
