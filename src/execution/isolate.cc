@@ -1029,6 +1029,24 @@ class CallSiteBuilder {
     return true;
   }
 
+  bool VisitOptimized(
+      OptimizedJSFrame::CallSiteBuilderFrameData const& frame_data) {
+    if (Full()) return false;
+    if (!IsVisibleInStackTraceSecurityChecked(frame_data.function)) {
+      skipped_prev_frame_ = true;
+      return true;
+    }
+
+    int flags = 0;
+    if (IsStrictFrame(frame_data.function)) flags |= CallSiteInfo::kIsStrict;
+    if (frame_data.is_constructor) flags |= CallSiteInfo::kIsConstructor;
+
+    AppendFrame(Cast<UnionOf<JSAny, Hole>>(frame_data.receiver),
+                frame_data.function, frame_data.bytecode_array,
+                frame_data.bytecode_offset, flags);
+    return true;
+  }
+
   void AppendAsyncFrame(DirectHandle<JSGeneratorObject> generator_object) {
     DirectHandle<JSFunction> function(generator_object->function(), isolate_);
     if (!IsVisibleInStackTrace(function)) {
@@ -1071,7 +1089,7 @@ class CallSiteBuilder {
   void AppendJavaScriptFrame(
       FrameSummary::JavaScriptFrameSummary const& summary) {
     // Filter out internal frames that we do not want to show.
-    if (!IsVisibleInStackTrace(summary.function())) {
+    if (!IsVisibleInStackTraceSecurityChecked(summary.function())) {
       skipped_prev_frame_ = true;
       return;
     }
@@ -1159,6 +1177,11 @@ class CallSiteBuilder {
                isolate_->raw_native_context());
   }
 
+  bool IsVisibleInStackTraceSecurityChecked(
+      DirectHandle<JSFunction> function) {
+    return ShouldIncludeFrame(function) && IsNotHidden(function);
+  }
+
   // This mechanism excludes a number of uninteresting frames from the stack
   // trace. This can be be the first frame (which will be a builtin-exit frame
   // for the error constructor builtin) or every frame until encountering a
@@ -1238,9 +1261,14 @@ class CallSiteBuilder {
     // Set the last field first and grow the array if needed.
     static_assert(CallSiteInfo::Fields::kFlags ==
                   CallSiteInfo::Fields::kCount - 1);
-    elements_ = FixedArray::SetAndGrow(
-        isolate_, elements_, base_index + CallSiteInfo::Fields::kFlags,
-        Smi::FromInt(flags));
+    int flags_index = base_index + CallSiteInfo::Fields::kFlags;
+    if (V8_LIKELY(static_cast<uint32_t>(flags_index) <
+                  elements_->ulength().value())) {
+      elements_->set(flags_index, Smi::FromInt(flags));
+    } else {
+      elements_ = FixedArray::SetAndGrow(isolate_, elements_, flags_index,
+                                         Smi::FromInt(flags));
+    }
 
     elements_->set(base_index + CallSiteInfo::Fields::kReceiver,
                    *receiver_or_instance);
@@ -1612,6 +1640,7 @@ void VisitStack_ForCallSiteBuilder(Isolate* isolate, CallSiteBuilder* visitor) {
   // Track whether the last physical frame produced any visited summarized
   // frames. Used to correctly attribute construct-call flags.
   bool skipped_last_frame = true;
+  FrameSummaries optimized_summaries;
   for (StackFrameIterator it(isolate); !it.done(); it.Advance()) {
     StackFrame* frame = it.frame();
     switch (frame->type()) {
@@ -1643,18 +1672,50 @@ void VisitStack_ForCallSiteBuilder(Isolate* isolate, CallSiteBuilder* visitor) {
 #endif  // V8_ENABLE_DRUMBRAKE
 #endif  // V8_ENABLE_WEBASSEMBLY
       {
+        if (frame->is_optimized_js()) {
+          OptimizedJSFrame::CallSiteBuilderFrameData frame_data;
+          if (static_cast<OptimizedJSFrame*>(frame)
+                  ->TryGetSingleInterpretedFrameForCallSiteBuilder(
+                      &frame_data)) {
+            skipped_last_frame = true;
+            if (!frame_data.function
+                     ->native_context()
+                     ->HasSameSecurityTokenAs(
+                         isolate->raw_native_context())) {
+              break;
+            }
+            if (!visitor->VisitOptimized(frame_data)) return;
+            skipped_last_frame = false;
+            break;
+          }
+        }
+
         // A standard frame may include many summarized frames (due to
         // inlining).
-        FrameSummaries summaries = CommonFrame::cast(frame)->Summarize();
-        if (summaries.top_frame_is_construct_call && !skipped_last_frame) {
+        FrameSummaries other_summaries;
+        FrameSummaries* summaries;
+        if (frame->is_optimized_js()) {
+          static_cast<OptimizedJSFrame*>(frame)->SummarizeInto(
+              &optimized_summaries);
+          summaries = &optimized_summaries;
+        } else {
+          other_summaries = CommonFrame::cast(frame)->Summarize();
+          summaries = &other_summaries;
+        }
+        if (summaries->top_frame_is_construct_call && !skipped_last_frame) {
           visitor->SetPrevFrameAsConstructCall();
         }
         skipped_last_frame = true;
-        for (auto& summary : base::Reversed(summaries.frames)) {
+        for (auto& summary : base::Reversed(summaries->frames)) {
           // CaptureSimpleStackTrace uses kDetailed, which does not expose
           // frames across security origins.
-          if (!summary.native_context()->HasSameSecurityTokenAs(
-                  isolate->raw_native_context())) {
+          if (summary.IsJavaScript()
+                  ? !summary.AsJavaScript()
+                         .function()
+                         ->native_context()
+                         ->HasSameSecurityTokenAs(isolate->raw_native_context())
+                  : !summary.native_context()->HasSameSecurityTokenAs(
+                        isolate->raw_native_context())) {
             continue;
           }
           if (!visitor->Visit(summary)) return;

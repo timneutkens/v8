@@ -5,6 +5,7 @@
 #ifndef V8_EXECUTION_FRAMES_H_
 #define V8_EXECUTION_FRAMES_H_
 
+#include <optional>
 #include <tuple>
 
 #include "include/v8-initialization.h"
@@ -1178,6 +1179,18 @@ class OptimizedJSFrame : public JavaScriptFrame {
 
   FrameSummaries Summarize(AllowAllocation allow_allocation = AllowAllocation{
                                true}) const override;
+  void SummarizeInto(FrameSummaries* summaries,
+                     AllowAllocation allow_allocation = AllowAllocation{
+                         true}) const;
+  struct CallSiteBuilderFrameData {
+    Handle<Object> receiver;
+    Handle<JSFunction> function;
+    Handle<BytecodeArray> bytecode_array;
+    int bytecode_offset = 0;
+    bool is_constructor = false;
+  };
+  bool TryGetSingleInterpretedFrameForCallSiteBuilder(
+      CallSiteBuilderFrameData* frame_data) const;
 
   Tagged<DeoptimizationData> GetDeoptimizationData(Tagged<Code> code,
                                                    int* deopt_index) const;
@@ -1200,8 +1213,9 @@ class OptimizedJSFrame : public JavaScriptFrame {
   // Full TranslatedState-based walk, used as fallback when the lightweight
   // path in Summarize() encounters frames it cannot handle (e.g.
   // wasm-inlined-into-JS frames).
-  FrameSummaries SummarizeFull(Tagged<DeoptimizationData> data, int deopt_index,
-                               AllowAllocation allow_allocation) const;
+  void SummarizeFullInto(FrameSummaries* summaries,
+                         Tagged<DeoptimizationData> data, int deopt_index,
+                         AllowAllocation allow_allocation) const;
 
  protected:
   inline explicit OptimizedJSFrame(StackFrameIteratorBase* iterator);

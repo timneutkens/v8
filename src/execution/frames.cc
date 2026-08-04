@@ -23,6 +23,7 @@
 #include "src/execution/frame-constants.h"
 #include "src/execution/frames-inl.h"
 #include "src/execution/vm-state-inl.h"
+#include "src/heap/heap-inl.h"
 #include "src/ic/ic-stats.h"
 #include "src/logging/counters.h"
 #include "src/objects/abstract-code-inl.h"
@@ -783,7 +784,14 @@ std::optional<Tagged<GcSafeCode>> GetContainingCode(Isolate* isolate,
 }  // namespace
 
 Tagged<GcSafeCode> StackFrame::GcSafeLookupCode() const {
-  return GcSafeLookupCodeAndOffset().first;
+  const Address pc = maybe_unauthenticated_pc();
+  Tagged<GcSafeCode> result = GetContainingCode(isolate(), pc).value();
+#if DEBUG
+  // Preserve the bounds check that was previously performed as a side effect
+  // of calling GcSafeLookupCodeAndOffset().
+  static_cast<void>(result->GetOffsetFromInstructionStart(isolate(), pc));
+#endif
+  return result;
 }
 
 std::pair<Tagged<GcSafeCode>, int> StackFrame::GcSafeLookupCodeAndOffset()
@@ -1713,6 +1721,33 @@ MaglevSafepointEntry& GetMaglevSafepointEntryFromCodeCache(
                                               inner_pointer));
   }
   return entry->maglev_safepoint_entry;
+}
+
+Tagged<DeoptimizationData> GetDeoptimizationDataFromCachedEntry(
+    Isolate* isolate, Tagged<Code> code, Address pc,
+    InnerPointerToCodeCache::Entry* entry, int* deopt_index) {
+  DCHECK(code->contains(isolate, pc));
+  DCHECK(CodeKindCanDeoptimize(code->kind()));
+  CHECK(entry->code.has_value());
+  DCHECK_EQ(entry->inner_pointer, pc);
+  DCHECK_EQ(entry->code.value(), code);
+  if (code->is_maglevved()) {
+    MaglevSafepointEntry& safepoint_entry =
+        GetMaglevSafepointEntryFromCodeCache(isolate, pc, entry);
+    if (safepoint_entry.has_deoptimization_index()) {
+      *deopt_index = safepoint_entry.deoptimization_index();
+      return code->deoptimization_data();
+    }
+  } else {
+    SafepointEntry& safepoint_entry =
+        GetSafepointEntryFromCodeCache(isolate, pc, entry);
+    if (safepoint_entry.has_deoptimization_index()) {
+      *deopt_index = safepoint_entry.deoptimization_index();
+      return code->deoptimization_data();
+    }
+  }
+  *deopt_index = SafepointEntry::kNoDeoptIndex;
+  return {};
 }
 
 }  // namespace
@@ -3018,19 +3053,6 @@ FrameSummary::BuiltinFrameSummary::CreateStackFrameInfo() const {
 
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-FrameSummary::~FrameSummary() {
-#define FRAME_SUMMARY_DESTR(kind, type, field, desc) \
-  case kind:                                         \
-    field.~type();                                   \
-    break;
-  switch (base_.kind()) {
-    FRAME_SUMMARY_VARIANTS(FRAME_SUMMARY_DESTR)
-    default:
-      UNREACHABLE();
-  }
-#undef FRAME_SUMMARY_DESTR
-}
-
 FrameSummary FrameSummary::GetInnermost(const CommonFrame* frame) {
   FrameSummaries summaries = frame->Summarize();
   DCHECK_LT(0, summaries.size());
@@ -3089,23 +3111,91 @@ FRAME_SUMMARY_DISPATCH(DirectHandle<StackFrameInfo>, CreateStackFrameInfo)
 #undef CASE_WASM_INTERPRETED
 #undef FRAME_SUMMARY_DISPATCH
 
+FrameSummary::~FrameSummary() {
+#define FRAME_SUMMARY_DESTR(kind, type, field, desc) \
+  case kind:                                         \
+    field.~type();                                   \
+    break;
+  switch (base_.kind()) {
+    FRAME_SUMMARY_VARIANTS(FRAME_SUMMARY_DESTR)
+    default:
+      UNREACHABLE();
+  }
+#undef FRAME_SUMMARY_DESTR
+}
+
 FrameSummaries OptimizedJSFrame::Summarize(
     AllowAllocation allow_allocation) const {
-  DCHECK(is_optimized());
   FrameSummaries summaries;
+  SummarizeInto(&summaries, allow_allocation);
+  return summaries;
+}
 
-  // Delegate to JS frame in absence of deoptimization info.
-  // TODO(turbofan): Revisit once we support deoptimization across the board.
-  DirectHandle<Code> code(LookupCode(), isolate());
+bool OptimizedJSFrame::TryGetSingleInterpretedFrameForCallSiteBuilder(
+    CallSiteBuilderFrameData* frame_data) const {
+  DCHECK(is_optimized());
+  Address pc = maybe_unauthenticated_pc();
+  InnerPointerToCodeCache::Entry* cache_entry =
+      isolate()->inner_pointer_to_code_cache()->GetCacheEntry(pc);
+  CHECK(cache_entry->code.has_value());
+  DCHECK_NE(isolate()->heap()->gc_state(), Heap::MARK_COMPACT);
+  DirectHandle<Code> code(TrustedCast<Code>(cache_entry->code.value()),
+                          isolate());
   if (code->kind() == CodeKind::BUILTIN ||
       code->kind() == CodeKind::FOR_TESTING_JS) {
-    return JavaScriptFrame::Summarize(allow_allocation);
+    return false;
   }
   DCHECK_NE(code->kind(), CodeKind::FOR_TESTING);
 
   int deopt_index = SafepointEntry::kNoDeoptIndex;
   Tagged<DeoptimizationData> const data =
-      GetDeoptimizationData(*code, &deopt_index);
+      GetDeoptimizationDataFromCachedEntry(isolate(), *code, pc, cache_entry,
+                                           &deopt_index);
+  if (deopt_index == SafepointEntry::kNoDeoptIndex) return false;
+
+  DeoptimizationData::BytecodeOffsetInfo bytecode_offset_info =
+      data->GetBytecodeOffsetInfo(deopt_index);
+  if (!bytecode_offset_info.is_single_interpreted_frame) return false;
+
+  DCHECK_GT(data->ProtectedLiteralArray()->length(), 0);
+  Tagged<BytecodeArray> bytecode_array = SbxCast<BytecodeArray>(
+      data->ProtectedLiteralArray()->get(0));
+
+  frame_data->receiver = handle(receiver(), isolate());
+  frame_data->function = handle(function(), isolate());
+  frame_data->bytecode_array = handle(bytecode_array, isolate());
+  frame_data->bytecode_offset = bytecode_offset_info.bytecode_offset.ToInt();
+  frame_data->is_constructor = IsConstructor();
+  return true;
+}
+
+void OptimizedJSFrame::SummarizeInto(
+    FrameSummaries* out_summaries, AllowAllocation allow_allocation) const {
+  DCHECK(is_optimized());
+  out_summaries->frames.clear();
+  out_summaries->top_frame_is_construct_call = false;
+  FrameSummaries& summaries = *out_summaries;
+
+  // Delegate to JS frame in absence of deoptimization info.
+  // TODO(turbofan): Revisit once we support deoptimization across the board.
+  Address pc = maybe_unauthenticated_pc();
+  InnerPointerToCodeCache::Entry* cache_entry =
+      isolate()->inner_pointer_to_code_cache()->GetCacheEntry(pc);
+  CHECK(cache_entry->code.has_value());
+  DCHECK_NE(isolate()->heap()->gc_state(), Heap::MARK_COMPACT);
+  DirectHandle<Code> code(TrustedCast<Code>(cache_entry->code.value()),
+                          isolate());
+  if (code->kind() == CodeKind::BUILTIN ||
+      code->kind() == CodeKind::FOR_TESTING_JS) {
+    summaries = JavaScriptFrame::Summarize(allow_allocation);
+    return;
+  }
+  DCHECK_NE(code->kind(), CodeKind::FOR_TESTING);
+
+  int deopt_index = SafepointEntry::kNoDeoptIndex;
+  Tagged<DeoptimizationData> const data =
+      GetDeoptimizationDataFromCachedEntry(isolate(), *code, pc, cache_entry,
+                                           &deopt_index);
   if (deopt_index == SafepointEntry::kNoDeoptIndex) {
     // Hack: For maglevved function entry, we don't emit lazy deopt information,
     // so create an extra special summary here.
@@ -3127,7 +3217,7 @@ FrameSummaries OptimizedJSFrame::Summarize(
           isolate(), receiver(), function(), *abstract_code,
           kFunctionEntryBytecodeOffset, IsConstructor());
       summaries.frames.push_back(summary);
-      return summaries;
+      return;
     }
 
     CHECK(data.is_null());
@@ -3152,7 +3242,7 @@ FrameSummaries OptimizedJSFrame::Summarize(
         isolate(), receiver(), function(), *abstract_code,
         bytecode_offset_info.bytecode_offset.ToInt(), IsConstructor());
     summaries.frames.push_back(summary);
-    return summaries;
+    return;
   }
 
   Tagged<DeoptimizationLiteralArray> literal_array = data->LiteralArray();
@@ -3250,16 +3340,18 @@ FrameSummaries OptimizedJSFrame::Summarize(
   }  // no_gc scope ends.
 
   if (needs_full_walk) {
-    return SummarizeFull(data, deopt_index, allow_allocation);
+    SummarizeFullInto(&summaries, data, deopt_index, allow_allocation);
+    return;
   }
-
-  return summaries;
 }
 
-FrameSummaries OptimizedJSFrame::SummarizeFull(
-    Tagged<DeoptimizationData> data, int deopt_index,
+void OptimizedJSFrame::SummarizeFullInto(
+    FrameSummaries* out_summaries, Tagged<DeoptimizationData> data,
+    int deopt_index,
     AllowAllocation allow_allocation) const {
-  FrameSummaries summaries;
+  out_summaries->frames.clear();
+  out_summaries->top_frame_is_construct_call = false;
+  FrameSummaries& summaries = *out_summaries;
 
   DCHECK_NE(deopt_index, SafepointEntry::kNoDeoptIndex);
   DCHECK(!data.is_null());
@@ -3356,7 +3448,6 @@ FrameSummaries OptimizedJSFrame::SummarizeFull(
     // frames) is a construct call.
     summaries.top_frame_is_construct_call = true;
   }
-  return summaries;
 }
 
 int OptimizedJSFrame::LookupExceptionHandlerInTable(
