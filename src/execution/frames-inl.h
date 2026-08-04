@@ -97,8 +97,11 @@ class InnerPointerToCodeCache final {
   }
 
   Entry* GetCacheEntry(Address inner_pointer);
+  Entry* GetCacheEntryAndIndex(Address inner_pointer, uint16_t* index_out);
+  Entry* GetCacheEntryFromKnownIndex(Address inner_pointer, uint16_t index);
 
  private:
+  V8_INLINE uint16_t ComputeCacheIndex(Address inner_pointer) const;
   Entry* cache(int index) { return &cache_[index]; }
 
   Isolate* const isolate_;

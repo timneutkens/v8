@@ -964,8 +964,10 @@ StackFrame::Type StackFrameIterator::ComputeStackFrameType(
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   // Look up the code object to figure out the type of the stack frame.
-  std::optional<Tagged<GcSafeCode>> lookup_result =
-      GetContainingCode(isolate(), pc);
+  InnerPointerToCodeCache::Entry* resolved_code_entry =
+      isolate()->inner_pointer_to_code_cache()->GetCacheEntryAndIndex(
+          pc, &state->inner_pointer_to_code_cache_index);
+  std::optional<Tagged<GcSafeCode>> lookup_result = resolved_code_entry->code;
   if (!lookup_result.has_value()) return StackFrame::NATIVE;
 
   MSAN_MEMORY_IS_INITIALIZED(
@@ -3133,11 +3135,18 @@ FrameSummaries OptimizedJSFrame::Summarize(
 
 bool OptimizedJSFrame::TryGetSingleInterpretedFrameForCallSiteBuilder(
     std::optional<CallSiteBuilderFrameData>* frame_data,
-    FrameSummaries* fallback_summaries) const {
+    FrameSummaries* fallback_summaries,
+    uint16_t inner_pointer_to_code_cache_index) const {
   DCHECK(is_optimized());
   Address pc = maybe_unauthenticated_pc();
   InnerPointerToCodeCache::Entry* cache_entry =
-      isolate()->inner_pointer_to_code_cache()->GetCacheEntry(pc);
+      inner_pointer_to_code_cache_index ==
+              StackFrame::kNoInnerPointerToCodeCacheIndex
+          ? isolate()->inner_pointer_to_code_cache()->GetCacheEntry(pc)
+          : isolate()
+                ->inner_pointer_to_code_cache()
+                ->GetCacheEntryFromKnownIndex(
+                    pc, inner_pointer_to_code_cache_index);
   CHECK(cache_entry->code.has_value());
   DCHECK_NE(isolate()->heap()->gc_state(), Heap::MARK_COMPACT);
   DirectHandle<Code> code(TrustedCast<Code>(cache_entry->code.value()),
@@ -4363,6 +4372,12 @@ uint32_t PcAddressForHashing(Isolate* isolate, Address address) {
 
 }  // namespace
 
+V8_INLINE uint16_t InnerPointerToCodeCache::ComputeCacheIndex(
+    Address address) const {
+  uint32_t hash = base::hash32(PcAddressForHashing(isolate_, address));
+  return static_cast<uint16_t>(hash & (kInnerPointerToCodeCacheSize - 1));
+}
+
 InnerPointerToCodeCache::Entry* InnerPointerToCodeCache::GetCacheEntry(
     Address inner_pointer) {
   DCHECK(base::bits::IsPowerOfTwo(kInnerPointerToCodeCacheSize));
@@ -4387,6 +4402,45 @@ InnerPointerToCodeCache::Entry* InnerPointerToCodeCache::GetCacheEntry(
     // also queries the cache, we cannot update inner_pointer before the code
     // has been set. Otherwise, we risk trying to use a cache entry before
     // the code has been computed.
+    entry->code =
+        isolate_->heap()->GcSafeFindCodeForInnerPointer(inner_pointer);
+    entry->ResetSafepoint();
+    entry->inner_pointer = inner_pointer;
+  }
+  return entry;
+}
+
+InnerPointerToCodeCache::Entry*
+InnerPointerToCodeCache::GetCacheEntryAndIndex(Address inner_pointer,
+                                               uint16_t* index_out) {
+  uint16_t index = ComputeCacheIndex(inner_pointer);
+  *index_out = index;
+  Entry* entry = cache(index);
+  if (entry->inner_pointer == inner_pointer) {
+    DCHECK_EQ(entry->code,
+              isolate_->heap()->GcSafeFindCodeForInnerPointer(inner_pointer));
+  } else {
+    entry->code =
+        isolate_->heap()->GcSafeFindCodeForInnerPointer(inner_pointer);
+    entry->ResetSafepoint();
+    entry->inner_pointer = inner_pointer;
+  }
+  return entry;
+}
+
+InnerPointerToCodeCache::Entry*
+InnerPointerToCodeCache::GetCacheEntryFromKnownIndex(Address inner_pointer,
+                                                     uint16_t index) {
+  DCHECK_LT(index, kInnerPointerToCodeCacheSize);
+  DCHECK_EQ(index, ComputeCacheIndex(inner_pointer));
+  Entry* entry = cache(index);
+  if (V8_LIKELY(entry->inner_pointer == inner_pointer)) {
+    DCHECK_EQ(entry->code,
+              isolate_->heap()->GcSafeFindCodeForInnerPointer(inner_pointer));
+  } else {
+    // A profiling signal may replace the direct-mapped slot between frame
+    // classification and stack summarization. The known index remains the
+    // correct hash slot, so refill it without hashing the PC again.
     entry->code =
         isolate_->heap()->GcSafeFindCodeForInnerPointer(inner_pointer);
     entry->ResetSafepoint();

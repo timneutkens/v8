@@ -1727,7 +1727,8 @@ void VisitStack_ForCallSiteBuilder(Isolate* isolate, CallSiteBuilder* visitor) {
         if (frame->is_optimized_js()) {
           if (static_cast<OptimizedJSFrame*>(frame)
                   ->TryGetSingleInterpretedFrameForCallSiteBuilder(
-                      &frame_data, &optimized_summaries)) {
+                      &frame_data, &optimized_summaries,
+                      frame->inner_pointer_to_code_cache_index())) {
             skipped_last_frame = true;
             DCHECK(frame_data.has_value());
             if (!frame_data->function
