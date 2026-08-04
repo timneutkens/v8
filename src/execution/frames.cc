@@ -3132,7 +3132,8 @@ FrameSummaries OptimizedJSFrame::Summarize(
 }
 
 bool OptimizedJSFrame::TryGetSingleInterpretedFrameForCallSiteBuilder(
-    CallSiteBuilderFrameData* frame_data) const {
+    std::optional<CallSiteBuilderFrameData>* frame_data,
+    FrameSummaries* fallback_summaries) const {
   DCHECK(is_optimized());
   Address pc = maybe_unauthenticated_pc();
   InnerPointerToCodeCache::Entry* cache_entry =
@@ -3143,7 +3144,10 @@ bool OptimizedJSFrame::TryGetSingleInterpretedFrameForCallSiteBuilder(
                           isolate());
   if (code->kind() == CodeKind::BUILTIN ||
       code->kind() == CodeKind::FOR_TESTING_JS) {
-    return false;
+    return SummarizeIntoFromLookup(fallback_summaries, code, {},
+                                   SafepointEntry::kNoDeoptIndex,
+                                   {BytecodeOffset::None(), false},
+                                   AllowAllocation{true});
   }
   DCHECK_NE(code->kind(), CodeKind::FOR_TESTING);
 
@@ -3151,30 +3155,37 @@ bool OptimizedJSFrame::TryGetSingleInterpretedFrameForCallSiteBuilder(
   Tagged<DeoptimizationData> const data =
       GetDeoptimizationDataFromCachedEntry(isolate(), *code, pc, cache_entry,
                                            &deopt_index);
-  if (deopt_index == SafepointEntry::kNoDeoptIndex) return false;
+  if (deopt_index == SafepointEntry::kNoDeoptIndex) {
+    return SummarizeIntoFromLookup(fallback_summaries, code, data,
+                                   deopt_index,
+                                   {BytecodeOffset::None(), false},
+                                   AllowAllocation{true});
+  }
 
   DeoptimizationData::BytecodeOffsetInfo bytecode_offset_info =
       data->GetBytecodeOffsetInfo(deopt_index);
-  if (!bytecode_offset_info.is_single_interpreted_frame) return false;
+  if (!bytecode_offset_info.is_single_interpreted_frame) {
+    return SummarizeIntoFromLookup(fallback_summaries, code, data,
+                                   deopt_index, bytecode_offset_info,
+                                   AllowAllocation{true});
+  }
 
   DCHECK_GT(data->ProtectedLiteralArray()->length(), 0);
   Tagged<BytecodeArray> bytecode_array = SbxCast<BytecodeArray>(
       data->ProtectedLiteralArray()->get(0));
 
-  frame_data->receiver = handle(receiver(), isolate());
-  frame_data->function = handle(function(), isolate());
-  frame_data->bytecode_array = handle(bytecode_array, isolate());
-  frame_data->bytecode_offset = bytecode_offset_info.bytecode_offset.ToInt();
-  frame_data->is_constructor = IsConstructor();
+  CallSiteBuilderFrameData& result = frame_data->emplace();
+  result.receiver = handle(receiver(), isolate());
+  result.function = handle(function(), isolate());
+  result.bytecode_array = handle(bytecode_array, isolate());
+  result.bytecode_offset = bytecode_offset_info.bytecode_offset.ToInt();
+  result.is_constructor = IsConstructor();
   return true;
 }
 
 void OptimizedJSFrame::SummarizeInto(
     FrameSummaries* out_summaries, AllowAllocation allow_allocation) const {
   DCHECK(is_optimized());
-  out_summaries->frames.clear();
-  out_summaries->top_frame_is_construct_call = false;
-  FrameSummaries& summaries = *out_summaries;
 
   // Delegate to JS frame in absence of deoptimization info.
   // TODO(turbofan): Revisit once we support deoptimization across the board.
@@ -3185,17 +3196,40 @@ void OptimizedJSFrame::SummarizeInto(
   DCHECK_NE(isolate()->heap()->gc_state(), Heap::MARK_COMPACT);
   DirectHandle<Code> code(TrustedCast<Code>(cache_entry->code.value()),
                           isolate());
+  int deopt_index = SafepointEntry::kNoDeoptIndex;
+  Tagged<DeoptimizationData> data;
+  DeoptimizationData::BytecodeOffsetInfo bytecode_offset_info = {
+      BytecodeOffset::None(), false};
+  if (code->kind() != CodeKind::BUILTIN &&
+      code->kind() != CodeKind::FOR_TESTING_JS) {
+    DCHECK_NE(code->kind(), CodeKind::FOR_TESTING);
+    data = GetDeoptimizationDataFromCachedEntry(isolate(), *code, pc,
+                                                cache_entry, &deopt_index);
+    if (deopt_index != SafepointEntry::kNoDeoptIndex) {
+      bytecode_offset_info = data->GetBytecodeOffsetInfo(deopt_index);
+    }
+  }
+  SummarizeIntoFromLookup(out_summaries, code, data, deopt_index,
+                          bytecode_offset_info,
+                          allow_allocation);
+}
+
+bool OptimizedJSFrame::SummarizeIntoFromLookup(
+    FrameSummaries* out_summaries, DirectHandle<Code> code,
+    Tagged<DeoptimizationData> data, int deopt_index,
+    DeoptimizationData::BytecodeOffsetInfo bytecode_offset_info,
+    AllowAllocation allow_allocation) const {
+  DCHECK(is_optimized());
+  out_summaries->frames.clear();
+  out_summaries->top_frame_is_construct_call = false;
+  FrameSummaries& summaries = *out_summaries;
+
   if (code->kind() == CodeKind::BUILTIN ||
       code->kind() == CodeKind::FOR_TESTING_JS) {
     summaries = JavaScriptFrame::Summarize(allow_allocation);
-    return;
+    return false;
   }
   DCHECK_NE(code->kind(), CodeKind::FOR_TESTING);
-
-  int deopt_index = SafepointEntry::kNoDeoptIndex;
-  Tagged<DeoptimizationData> const data =
-      GetDeoptimizationDataFromCachedEntry(isolate(), *code, pc, cache_entry,
-                                           &deopt_index);
   if (deopt_index == SafepointEntry::kNoDeoptIndex) {
     // Hack: For maglevved function entry, we don't emit lazy deopt information,
     // so create an extra special summary here.
@@ -3217,7 +3251,7 @@ void OptimizedJSFrame::SummarizeInto(
           isolate(), receiver(), function(), *abstract_code,
           kFunctionEntryBytecodeOffset, IsConstructor());
       summaries.frames.push_back(summary);
-      return;
+      return false;
     }
 
     CHECK(data.is_null());
@@ -3230,8 +3264,6 @@ void OptimizedJSFrame::SummarizeInto(
   // This avoids the expensive TranslatedState::Init + Prepare path that
   // would parse every value in every inlined frame.
 
-  DeoptimizationData::BytecodeOffsetInfo bytecode_offset_info =
-      data->GetBytecodeOffsetInfo(deopt_index);
   if (bytecode_offset_info.is_single_interpreted_frame) {
     DCHECK_GT(data->ProtectedLiteralArray()->length(), 0);
     DirectHandle<AbstractCode> abstract_code(
@@ -3242,7 +3274,7 @@ void OptimizedJSFrame::SummarizeInto(
         isolate(), receiver(), function(), *abstract_code,
         bytecode_offset_info.bytecode_offset.ToInt(), IsConstructor());
     summaries.frames.push_back(summary);
-    return;
+    return false;
   }
 
   Tagged<DeoptimizationLiteralArray> literal_array = data->LiteralArray();
@@ -3341,8 +3373,8 @@ void OptimizedJSFrame::SummarizeInto(
 
   if (needs_full_walk) {
     SummarizeFullInto(&summaries, data, deopt_index, allow_allocation);
-    return;
   }
+  return false;
 }
 
 void OptimizedJSFrame::SummarizeFullInto(
