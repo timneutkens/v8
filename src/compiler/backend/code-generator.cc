@@ -1081,7 +1081,9 @@ Handle<DeoptimizationData> CodeGenerator::GenerateDeoptimizationData() {
     DeoptimizationExit* deoptimization_exit = deoptimization_exits_[i];
     CHECK_NOT_NULL(deoptimization_exit);
     DCHECK_EQ(i, deoptimization_exit->deoptimization_id());
-    data->SetBytecodeOffset(i, deoptimization_exit->bailout_id());
+    data->SetBytecodeOffset(
+        i, deoptimization_exit->bailout_id(),
+        deoptimization_exit->is_single_interpreted_frame());
     data->SetTranslationIndex(
         i, Smi::FromInt(deoptimization_exit->translation_id()));
     data->SetPc(i, Smi::FromInt(deoptimization_exit->pc_offset()));
@@ -1431,6 +1433,30 @@ DeoptimizationExit* CodeGenerator::BuildTranslation(
   FrameStateDescriptor* const descriptor = entry.descriptor();
   frame_state_offset++;
 
+  // The first protected deoptimization literal is the bytecode array for the
+  // outer JavaScript frame. Stack-trace capture can then resolve an exact
+  // single-frame translation without decoding the translation header. This
+  // does not add a literal: the outer frame below references the same bytecode
+  // array and DefineProtectedDeoptimizationLiteral deduplicates it.
+  if (protected_deoptimization_literals_.empty()) {
+    FrameStateDescriptor* outermost_interpreted = nullptr;
+    for (FrameStateDescriptor* current = descriptor; current != nullptr;
+         current = current->outer_state()) {
+      if (current->type() == FrameStateType::kUnoptimizedFunction) {
+        outermost_interpreted = current;
+      }
+    }
+    // Continuation-only translations have no interpreter frame and leave the
+    // vector empty. The first translation containing an interpreter frame
+    // establishes the invariant; all subsequent translations take only the
+    // empty check above.
+    if (outermost_interpreted != nullptr) {
+      CHECK_EQ(
+          0, DefineProtectedDeoptimizationLiteral(
+                 outermost_interpreted->bytecode_array().ToHandleChecked()));
+    }
+  }
+
   const int translation_index = translations_.BeginTranslation(
       static_cast<int>(descriptor->GetFrameCount()),
       static_cast<int>(descriptor->GetJSFrameCount()),
@@ -1444,9 +1470,12 @@ DeoptimizationExit* CodeGenerator::BuildTranslation(
   InstructionOperandIterator iter(instr, frame_state_offset);
   BuildTranslationForFrameStateDescriptor(descriptor, &iter, state_combine);
 
+  const bool is_single_interpreted_frame =
+      descriptor->outer_state() == nullptr &&
+      descriptor->type() == FrameStateType::kUnoptimizedFunction;
   DeoptimizationExit* const exit = zone()->New<DeoptimizationExit>(
       current_source_position_, descriptor->bailout_id(), translation_index,
-      pc_offset, entry.kind(), entry.reason(),
+      pc_offset, entry.kind(), entry.reason(), is_single_interpreted_frame,
 #ifdef DEBUG
       entry.node_id());
 #else   // DEBUG

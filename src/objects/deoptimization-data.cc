@@ -201,11 +201,19 @@ void DeoptimizationData::Verify(Handle<BytecodeArray> bytecode) const {
     DeoptimizationFrameTranslation::Iterator iterator(FrameTranslation(), idx);
     auto [frame_count, jsframe_count] = iterator.EnterBeginOpcode();
     DCHECK_GE(frame_count, jsframe_count);
+    bool is_single_interpreted_frame =
+        frame_count == 1 && jsframe_count == 1;
     BytecodeOffset bailout = BytecodeOffset::None();
+    bool first_translation_frame = true;
     bool first_frame = true;
     while (frame_count > 0) {
       TranslationOpcode frame = iterator.SeekNextFrame();
       frame_count--;
+      if (first_translation_frame) {
+        is_single_interpreted_frame &=
+            IsTranslationInterpreterFrameOpcode(frame);
+        first_translation_frame = false;
+      }
       if (IsTranslationJsFrameOpcode(frame)) {
         jsframe_count--;
         if (first_frame) {
@@ -219,6 +227,8 @@ void DeoptimizationData::Verify(Handle<BytecodeArray> bytecode) const {
     }
     CHECK_EQ(frame_count, 0);
     CHECK_EQ(jsframe_count, 0);
+    DCHECK_EQ(is_single_interpreted_frame,
+              GetBytecodeOffsetInfo(i).is_single_interpreted_frame);
 
     // Check the bytecode offset exists in the bytecode array
     if (bailout != BytecodeOffset::None()) {

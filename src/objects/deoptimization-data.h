@@ -348,7 +348,15 @@ class DeoptimizationData : public ProtectedFixedArray {
   // result.
   inline BytecodeOffset GetBytecodeOffsetOrBuiltinContinuationId(int i) const;
 
-  inline void SetBytecodeOffset(int i, BytecodeOffset value);
+  struct BytecodeOffsetInfo {
+    BytecodeOffset bytecode_offset;
+    bool is_single_interpreted_frame;
+  };
+
+  inline BytecodeOffsetInfo GetBytecodeOffsetInfo(int i) const;
+
+  inline void SetBytecodeOffset(int i, BytecodeOffset value,
+                                bool is_single_interpreted_frame = false);
 
   inline uint32_t DeoptCount() const;
 

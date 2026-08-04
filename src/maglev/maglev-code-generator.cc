@@ -1245,6 +1245,7 @@ class MaglevFrameTranslationBuilder {
         object_ids_(10) {}
 
   void BuildEagerDeopt(EagerDeoptInfo* deopt_info) {
+    EnsureOuterBytecodeArrayIsFirst(deopt_info->top_frame());
     BuildBeginDeopt(deopt_info);
 
     const InputLocation* current_input_location = deopt_info->input_locations();
@@ -1256,6 +1257,7 @@ class MaglevFrameTranslationBuilder {
   }
 
   void BuildLazyDeopt(LazyDeoptInfo* deopt_info) {
+    EnsureOuterBytecodeArrayIsFirst(deopt_info->top_frame());
     BuildBeginDeopt(deopt_info);
 
     const InputLocation* current_input_location = deopt_info->input_locations();
@@ -1755,6 +1757,30 @@ class MaglevFrameTranslationBuilder {
     return *res.entry;
   }
 
+  void EnsureOuterBytecodeArrayIsFirst(const DeoptFrame& frame) {
+    if (!protected_deopt_literals_vector_->empty()) return;
+
+    const DeoptFrame* outermost_frame = &frame;
+    const InterpretedDeoptFrame* outermost_interpreted = nullptr;
+    if (outermost_frame->type() ==
+        DeoptFrame::FrameType::kInterpretedFrame) {
+      outermost_interpreted = &outermost_frame->as_interpreted();
+    }
+    while (outermost_frame->parent() != nullptr) {
+      outermost_frame = outermost_frame->parent();
+      if (outermost_frame->type() ==
+          DeoptFrame::FrameType::kInterpretedFrame) {
+        outermost_interpreted = &outermost_frame->as_interpreted();
+      }
+    }
+    if (outermost_interpreted == nullptr) return;
+
+    // The interpreted frame will add this same literal while emitting the
+    // translation, so seeding it only makes its index an explicit invariant.
+    CHECK_EQ(0, GetProtectedDeoptLiteral(
+                    *outermost_interpreted->GetBytecodeArray().object()));
+  }
+
   int GetDeoptLiteral(Tagged<Object> obj) {
     IdentityMapFindResult<int> res = deopt_literals_->FindOrInsert(obj);
     if (!res.already_exists) {
@@ -2205,7 +2231,11 @@ Handle<DeoptimizationData> MaglevCodeGenerator::GenerateDeoptimizationData(
   int i = 0;
   for (EagerDeoptInfo* deopt_info : code_gen_state_.eager_deopts()) {
     DCHECK_NE(deopt_info->translation_index(), -1);
-    raw_data->SetBytecodeOffset(i, deopt_info->top_frame().GetBytecodeOffset());
+    const DeoptFrame& top_frame = deopt_info->top_frame();
+    raw_data->SetBytecodeOffset(
+        i, top_frame.GetBytecodeOffset(),
+        top_frame.parent() == nullptr &&
+            top_frame.type() == DeoptFrame::FrameType::kInterpretedFrame);
     raw_data->SetTranslationIndex(
         i, Smi::FromInt(deopt_info->translation_index()));
     raw_data->SetPc(i, Smi::FromInt(deopt_info->deopt_entry_label()->pos()));
@@ -2216,7 +2246,11 @@ Handle<DeoptimizationData> MaglevCodeGenerator::GenerateDeoptimizationData(
   }
   for (LazyDeoptInfo* deopt_info : code_gen_state_.lazy_deopts()) {
     DCHECK_NE(deopt_info->translation_index(), -1);
-    raw_data->SetBytecodeOffset(i, deopt_info->top_frame().GetBytecodeOffset());
+    const DeoptFrame& top_frame = deopt_info->top_frame();
+    raw_data->SetBytecodeOffset(
+        i, top_frame.GetBytecodeOffset(),
+        top_frame.parent() == nullptr &&
+            top_frame.type() == DeoptFrame::FrameType::kInterpretedFrame);
     raw_data->SetTranslationIndex(
         i, Smi::FromInt(deopt_info->translation_index()));
     raw_data->SetPc(i, Smi::FromInt(deopt_info->deopt_entry_label()->pos()));
