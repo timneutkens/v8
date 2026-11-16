@@ -6,6 +6,7 @@ d8.file.execute('../base.js');
 
 d8.file.execute('serialize.js');
 d8.file.execute('capture.js');
+d8.file.execute('capture-unread.js');
 
 function PrintResult(name, result) {
   print(name + '-StackTrace(Score): ' + result);
